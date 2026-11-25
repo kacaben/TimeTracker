@@ -1,6 +1,10 @@
 # TimeTracker
 
+[![tests](https://github.com/kacaben/TimeTracker/actions/workflows/tests.yml/badge.svg)](https://github.com/kacaben/TimeTracker/actions/workflows/tests.yml)
+
 Personal start/stop time tracker. Python standard library only (no `pip install`), SQLite storage, single-page UI.
+
+![TimeTracker: start/stop timer, entries for the selected day, and the monthly overview with worked, target and missing hours](docs/screenshot.png)
 
 - One-click start/stop timer, manual entries, editing, per-day entry list.
 - Monthly overview: worked vs. target hours, overtime, and hours needed per remaining workday.
