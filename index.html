@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TimeTracker</title>
+<!-- flatpickr 4.6.13 (MIT), served locally from /vendor so it works offline -->
+<link rel="stylesheet" href="/vendor/flatpickr/flatpickr.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" href="/vendor/flatpickr/dark.min.css" media="(prefers-color-scheme: dark)">
+<script src="/vendor/flatpickr/flatpickr.min.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2430; --muted:#778; --line:#e3e6ec; --accent:#2563eb; --stop:#dc2626; --ok:#16a34a; --warn:#d97706; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#13161b; --card:#1c2128; --fg:#e6e9ee; --muted:#8b93a1; --line:#2c333d; --accent:#4f86f7; --stop:#ef4444; --ok:#34d399; --warn:#fbbf24; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:600; }
+  .todaydate { font-size:18px; font-weight:600; margin-bottom:12px; }
+  .tracker { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  #toggle { font-size:20px; font-weight:600; padding:16px 32px; border:0; border-radius:12px; color:#fff; background:var(--accent); cursor:pointer; min-width:150px; }
+  #toggle.running { background:var(--stop); }
+  #elapsed { font-size:36px; font-variant-numeric:tabular-nums; font-weight:600; }
+  .sub { color:var(--muted); font-size:13px; }
+  input, button { font:inherit; color:inherit; }
+  input[type=text], input[type=number], input[type=datetime-local], input[type=date] {
+    background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:7px 10px; }
+  button.small { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:6px 12px; cursor:pointer; }
+  button.small:hover { border-color:var(--accent); }
+  button.danger:hover { border-color:var(--stop); color:var(--stop); }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:12px; margin-bottom:12px; }
+  .stat { background:var(--bg); border-radius:10px; padding:10px 12px; }
+  .stat b { display:block; font-size:24px; font-variant-numeric:tabular-nums; }
+  .stat.missing b { color:var(--warn); } .stat.over b { color:var(--ok); }
+  .monthnav { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+  .monthnav strong { min-width:130px; text-align:center; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { font-size:12px; color:var(--muted); font-weight:600; }
+  td.n, th.n { text-align:right; }
+  tr.day { cursor:pointer; } tr.day:hover { background:var(--bg); }
+  tr.weekend td { color:var(--muted); } tr.today td:first-child { font-weight:700; }
+  tr.sel { background:var(--bg); outline:2px solid var(--accent); outline-offset:-2px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .entry { padding:8px 0; border-bottom:1px solid var(--line); }
+  .entry:last-child { border-bottom:0; }
+  .grow { flex:1; min-width:120px; }
+  input.dt { width:150px; font-variant-numeric:tabular-nums; }
+  #error { color:var(--stop); min-height:1.2em; font-size:13px; }
+  .empty { color:var(--muted); padding:6px 0; }
+</style>
+</head>
+<body>
+<main>
+  <section class="card">
+    <div class="todaydate" id="todaydate"></div>
+    <div class="tracker">
+      <button id="toggle">Start</button>
+      <div>
+        <div id="elapsed">0:00:00</div>
+        <div class="sub" id="runinfo">Not running</div>
+      </div>
+      <input type="text" id="activity" class="grow" placeholder="Activity (optional)" maxlength="200">
+    </div>
+    <div id="error"></div>
+  </section>
+
+  <section class="card" id="entriesCard">
+    <h2 id="daytitle">Entries</h2>
+    <div id="entries"></div>
+    <div class="row" style="margin-top:12px">
+      <input type="text" id="addStart" class="dt" placeholder="DD.MM.YYYY HH:MM">
+      <span class="sub">to</span>
+      <input type="text" id="addEnd" class="dt" placeholder="DD.MM.YYYY HH:MM">
+      <input type="text" id="addAct" class="grow" placeholder="Activity (optional)" maxlength="200">
+      <button class="small" id="addBtn">Add entry</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Month</h2>
+    <div class="monthnav">
+      <button class="small" id="prev">&larr;</button>
+      <strong id="monthlabel"></strong>
+      <button class="small" id="next">&rarr;</button>
+      <button class="small" id="thismonth">This month</button>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <label class="sub">Daily hours
+        <input type="number" id="dailyhours" min="0.5" max="24" step="0.5" style="width:70px">
+      </label>
+      <label class="sub">valid from
+        <input type="text" id="hoursfrom" class="dt" style="width:110px" placeholder="DD.MM.YYYY">
+      </label>
+      <button class="small" id="savehours">Save</button>
+      <span class="sub">Days before this date keep their previous value, so old months don't change.</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="sub">Worked</span><b id="sWorked"></b></div>
+      <div class="stat"><span class="sub">Target</span><b id="sTarget"></b></div>
+      <div class="stat" id="sMissingBox"><span class="sub" id="sMissingLbl">Missing</span><b id="sMissing"></b></div>
+      <div class="stat"><span class="sub">Needed per workday left</span><b id="sPer"></b><span class="sub" id="sLeft"></span></div>
+    </div>
+    <table>
+      <thead><tr><th>Date</th><th class="n">Worked</th><th class="n">Target</th><th class="n">Diff</th></tr></thead>
+      <tbody id="days"></tbody>
+    </table>
+  </section>
+
+</main>
+
+<script>
+const DAY = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const $ = id => document.getElementById(id);
+let S = null;            // last summary
+let fetchedAt = 0;       // Date.now() when S was fetched
+let month = ymd(new Date()).slice(0, 7);
+let selDay = ymd(new Date());
+
+function pad(n) { return String(n).padStart(2, '0'); }
+function ymd(d) { return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
+function hms(sec) { sec = Math.max(0, Math.floor(sec)); return `${Math.floor(sec/3600)}:${pad(Math.floor(sec%3600/60))}:${pad(sec%60)}`; }
+function hm(sec) { const neg = sec < 0; sec = Math.round(Math.abs(sec)/60); return `${neg?'-':''}${Math.floor(sec/60)}:${pad(sec%60)}`; }
+// Date/time fields are plain text in EU format DD.MM.YYYY HH:MM (native pickers follow the browser locale).
+function picker(el, dateOnly) {   // attach a calendar popup (EU format, Monday first, 24 h); no-op if the library did not load
+  if (window.flatpickr && !el._flatpickr) flatpickr(el, { enableTime: !dateOnly, time_24hr: true, dateFormat: dateOnly ? 'd.m.Y' : 'd.m.Y H:i', allowInput: true, weekNumbers: true, locale: { firstDayOfWeek: 1 } });
+  return el;
+}
+function fromDate(v) {   // 'DD.MM.YYYY' -> 'YYYY-MM-DD'
+  const m = /^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$/.exec(v || '');
+  const dt = m && new Date(+m[3], +m[2] - 1, +m[1]);
+  if (!m || dt.getDate() !== +m[1] || dt.getMonth() !== +m[2] - 1) throw new Error('Use the format DD.MM.YYYY, e.g. 01.11.2026');
+  return ymd(dt);
+}
+function setDT(el, v) { if (el._flatpickr) { if (v) el._flatpickr.setDate(v, false, el._flatpickr.config.dateFormat); else el._flatpickr.clear(); } else el.value = v; }
+function eu(day) { return `${day.slice(8)}.${day.slice(5,7)}.${day.slice(0,4)}`; }   // 'YYYY-MM-DD' -> 'DD.MM.YYYY'
+function toInput(ts) { const d = new Date(ts*1000); return `${pad(d.getDate())}.${pad(d.getMonth()+1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+function fromInput(v) {
+  const m = /^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*$/.exec(v || '');
+  const bad = new Error('Use the format DD.MM.YYYY HH:MM, e.g. 24.11.2026 09:30');
+  if (!m) throw bad;
+  const [d, mo, y, h, mi] = m.slice(1).map(Number);
+  const dt = new Date(y, mo - 1, d, h, mi);
+  if (dt.getDate() !== d || dt.getMonth() !== mo - 1 || h > 23 || mi > 59) throw bad;   // e.g. 31.02.
+  return dt.getTime() / 1000;
+}
+function clock(ts) { const d = new Date(ts*1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));   // error pages may not be JSON
+  if (!r.ok) throw new Error(j.error || `${r.status} ${r.statusText}`);
+  return j;
+}
+function showError(e) { $('error').textContent = e ? (e.message || e) : ''; }
+async function guard(fn) { try { showError(''); await fn(); } catch (e) { showError(e); } }
+
+async function load() {
+  S = await api('GET', '/api/summary?month=' + month);
+  fetchedAt = Date.now();
+  render();
+}
+
+function liveExtra() { return S.running && month === S.today.slice(0,7) ? (Date.now() - fetchedAt)/1000 : 0; }
+
+function render() {
+  const running = S.running;
+  $('toggle').textContent = running ? 'Stop' : 'Start';
+  $('toggle').classList.toggle('running', !!running);
+  if (document.activeElement !== $('activity')) $('activity').value = running ? running.activity : $('activity').value;
+  $('todaydate').textContent = new Date(S.today + 'T00:00').toLocaleDateString('en-GB', { weekday:'long' }) + ', ' + eu(S.today);
+  $('runinfo').textContent = running ? `Started ${clock(running.start)}` : 'Not running';
+  $('monthlabel').textContent = new Date(month + '-01T00:00').toLocaleDateString('en-GB', { month:'long', year:'numeric' });
+  if (document.activeElement !== $('dailyhours')) $('dailyhours').value = S.daily_hours;
+  $('sLeft').textContent = ` (${S.remaining_workdays} days)`;
+  renderDays();
+  renderEntries();
+  tick();
+}
+
+function tick() {   // cheap live update; no network
+  if (!S) return;
+  const extra = liveExtra();
+  const run = S.running;
+  $('elapsed').textContent = run ? hms(Date.now()/1000 - run.start) : '0:00:00';
+  const worked = S.worked + extra, missing = S.target - worked;
+  $('sWorked').textContent = hm(worked);
+  $('sTarget').textContent = hm(S.target);
+  $('sMissing').textContent = hm(Math.abs(missing));
+  $('sMissingLbl').textContent = missing < 0 ? 'Overtime' : 'Missing';
+  $('sMissingBox').className = 'stat ' + (missing < 0 ? 'over' : 'missing');
+  $('sPer').textContent = missing > 0 && S.remaining_workdays ? hm(missing / S.remaining_workdays) : '—';
+  const todayRow = document.querySelector('tr.today');
+  if (todayRow && extra) {
+    const d = S.days.find(x => x.date === S.today);
+    todayRow.children[1].textContent = hm(d.worked + extra);
+    todayRow.children[3].textContent = hm(d.worked + extra - d.target);
+  }
+  document.title = run ? `▶ ${hms(Date.now()/1000 - run.start)} · TimeTracker` : 'TimeTracker';
+}
+
+function renderDays() {
+  const tb = $('days'); tb.innerHTML = '';
+  for (const d of S.days) {
+    const tr = document.createElement('tr');
+    tr.className = 'day' + (d.weekday >= 5 ? ' weekend' : '') + (d.date === S.today ? ' today' : '') + (d.date === selDay ? ' sel' : '');
+    const cells = [`${DAY[d.weekday]} ${d.date.slice(8)}.${d.date.slice(5,7)}.`, d.worked ? hm(d.worked) : '', d.target ? hm(d.target) : '', d.target || d.worked ? hm(d.worked - d.target) : ''];
+    cells.forEach((c, i) => { const td = document.createElement('td'); td.textContent = c; if (i) td.className = 'n'; tr.appendChild(td); });
+    tr.onclick = () => { selDay = d.date; renderDays(); renderEntries(); $('entriesCard').scrollIntoView({ behavior:'smooth', block:'nearest' }); };
+    tb.appendChild(tr);
+  }
+}
+
+function entriesForDay(day) {   // real local midnights: daylight-saving days are 23 or 25 hours
+  const [y, m, d] = day.split('-').map(Number);
+  const s = new Date(y, m - 1, d).getTime()/1000, e = new Date(y, m - 1, d + 1).getTime()/1000;
+  return S.entries.filter(x => x.start < e && (x.end ?? Infinity) > s);
+}
+
+function renderEntries() {
+  $('daytitle').textContent = `Entries · ${new Date(selDay + 'T00:00').toLocaleDateString('en-GB', { weekday:'long', day:'numeric', month:'long' })}`;
+  const box = $('entries'); box.innerHTML = '';
+  const list = entriesForDay(selDay);
+  if (!list.length) box.innerHTML = '<div class="empty">No entries</div>';
+  for (const e of list) box.appendChild(entryRow(e));
+  if (!$('addStart').value) { setDT($('addStart'), eu(selDay) + ' 09:00'); setDT($('addEnd'), eu(selDay) + ' 17:00'); }
+}
+
+function entryRow(e) {
+  const div = document.createElement('div'); div.className = 'entry row';
+  const dur = ((e.end ?? Date.now()/1000) - e.start);
+  const label = document.createElement('span'); label.className = 'grow';
+  label.textContent = `${toInput(e.start)} → ${e.end ? toInput(e.end) : 'running'}  (${hm(dur)})${e.activity ? '  ·  ' + e.activity : ''}`;
+  const edit = btn('Edit', () => editRow(div, e));
+  const del = btn('Delete', () => confirm('Delete this entry?') && guard(async () => { await api('DELETE', '/api/entries/' + e.id); await load(); }));
+  del.classList.add('danger');
+  div.append(label, edit, del);
+  return div;
+}
+
+function btn(text, fn) { const b = document.createElement('button'); b.className = 'small'; b.textContent = text; b.onclick = fn; return b; }
+
+function editRow(div, e) {
+  div.innerHTML = '';
+  const s = Object.assign(document.createElement('input'), { type:'text', className:'dt', placeholder:'DD.MM.YYYY HH:MM', value: toInput(e.start) });
+  const en = Object.assign(document.createElement('input'), { type:'text', className:'dt', placeholder:'DD.MM.YYYY HH:MM', value: e.end ? toInput(e.end) : '', disabled: !e.end, title: e.end ? '' : 'Stop the timer to edit the end' });
+  const a = Object.assign(document.createElement('input'), { type:'text', value: e.activity, placeholder:'Activity', className:'grow', maxLength: 200 });
+  picker(s); if (e.end) picker(en);
+  const save = btn('Save', () => guard(async () => {
+    const body = {};
+    if (s.value !== toInput(e.start)) body.start = fromInput(s.value);   // untouched fields keep their seconds
+    if (e.end && en.value !== toInput(e.end)) body.end = fromInput(en.value);
+    if (a.value !== e.activity) body.activity = a.value;
+    if (Object.keys(body).length) await api('PATCH', '/api/entries/' + e.id, body);
+    await load();
+  }));
+  div.append(s, en, a, save, btn('Cancel', renderEntries));
+}
+
+$('toggle').onclick = () => guard(async () => {
+  const entry = await api('POST', '/api/toggle', { activity: $('activity').value });
+  if (entry.end !== null) $('activity').value = '';   // the server stopped the timer
+  await load();
+});
+$('activity').addEventListener('change', () => { if (S && S.running) guard(async () => { await api('PATCH', '/api/entries/' + S.running.id, { activity: $('activity').value }); await load(); }); });
+$('addBtn').onclick = () => guard(async () => {
+  await api('POST', '/api/entries', { start: fromInput($('addStart').value), end: fromInput($('addEnd').value), activity: $('addAct').value });
+  $('addAct').value = '';
+  await load();
+});
+$('savehours').onclick = () => guard(async () => {
+  await api('PUT', '/api/settings', { daily_hours: parseFloat($('dailyhours').value), effective_from: fromDate($('hoursfrom').value) });
+  await load();
+});
+function gotoMonth(m) { month = m; selDay = m === ymd(new Date()).slice(0,7) ? ymd(new Date()) : m + '-01'; setDT($('addStart'), ''); setDT($('addEnd'), ''); guard(load); }
+function shift(n) { const [y, m] = month.split('-').map(Number); const d = new Date(y, m - 1 + n, 1); gotoMonth(`${d.getFullYear()}-${pad(d.getMonth()+1)}`); }
+$('prev').onclick = () => shift(-1);
+$('next').onclick = () => shift(1);
+$('thismonth').onclick = () => gotoMonth(ymd(new Date()).slice(0, 7));
+
+// Confirm before closing/reloading the tab while the timer runs. Browsers show their own
+// standard wording (custom text is not allowed) and only do so after the page was clicked once.
+window.addEventListener('beforeunload', e => { if (S && S.running) { e.preventDefault(); e.returnValue = ''; } });
+
+picker($('addStart')); picker($('addEnd')); picker($('hoursfrom'), true);
+setDT($('hoursfrom'), eu(ymd(new Date())));
+setInterval(tick, 1000);
+setInterval(() => guard(load), 60000);   // resync (e.g. day change, edits from another tab)
+guard(load);
+</script>
+</body>
+</html>

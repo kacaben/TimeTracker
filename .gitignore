@@ -1,0 +1,8 @@
+# Personal data and logs: never commit
+*.db
+*.db-journal
+*.log
+
+__pycache__/
+*.pyc
+.venv/
