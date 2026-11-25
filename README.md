@@ -4,7 +4,7 @@
 
 Personal start/stop time tracker for several clients. Python standard library only (no `pip install`), SQLite storage, single-page UI.
 
-![TimeTracker: start/stop timer, entries for the selected day, and the monthly overview with worked, target and missing hours](docs/screenshot.png)
+![TimeTracker: client picker and start/stop timer, entries for the selected day, and the client's monthly overview with worked, target and missing hours](docs/screenshot.png)
 
 - One-click start/stop timer, manual entries, editing, per-day entry list.
 - Several clients, each with its own entries and daily hours. One timer: starting it for another client stops the running one.
