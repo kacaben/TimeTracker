@@ -11,7 +11,7 @@ Personal start/stop time tracker. Python standard library only (no `pip install`
 - Daily-hours target with history: a change applies from a chosen date, past months stay as they were.
 - Runs fully offline on your own PC; data stays in a local SQLite file.
 
-Requires Python 3.8+ and a modern browser.
+Requires Python 3.10+ and a modern browser.
 
 Open **http://localhost:8765** in a browser. The server listens on `127.0.0.1` only (this PC).
 
@@ -68,7 +68,7 @@ The server does not restart by itself until the next login or a manual start. St
 python -m unittest discover -s tests -v
 ```
 
-Standard library only. The daylight-saving test is skipped when the local time zone has no DST; CI runs it with `TZ=Europe/Prague`.
+Standard library only. The daylight-saving test is skipped when the local time zone has no DST; CI runs it on Linux with `TZ=Europe/Prague`.
 
 ## Security
 
