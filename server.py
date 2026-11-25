@@ -13,8 +13,10 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
+import webbrowser
 from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -299,10 +301,22 @@ def month_summary(con: sqlite3.Connection, month: str, client_id: int) -> dict:
 
 
 # --------------------------------------------------------------- validation
+def finite_float(v) -> float | None:
+    """A JSON number as a finite float, else None (rejects bools, NaN, infinity and huge integers)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:   # an integer with hundreds of digits
+        return None
+    return f if math.isfinite(f) else None
+
+
 def num(v, name: str) -> float:
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+    f = finite_float(v)
+    if f is None:
         raise ApiError(400, f"{name} must be a number (epoch seconds)")
-    return float(v)
+    return f
 
 
 def timestamp(v, name: str) -> float:
@@ -313,9 +327,10 @@ def timestamp(v, name: str) -> float:
 
 
 def daily_hours_value(v) -> float:
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not 0 < v <= 24:
+    f = finite_float(v)
+    if f is None or not 0 < f <= 24:
         raise ApiError(400, "daily_hours must be between 0 and 24.")
-    return float(v)
+    return f
 
 
 def activity_text(v) -> str:
@@ -346,8 +361,11 @@ def client_row(con: sqlite3.Connection, v, active: bool = False) -> sqlite3.Row:
 
 def check_interval(start: float, end: float | None) -> None:
     if end is None:
-        if start > time.time():
+        now = time.time()
+        if start > now:
             raise ApiError(400, "A running entry cannot start in the future.")
+        if now - start > MAX_ENTRY_SECONDS:
+            raise ApiError(400, f"A running entry can start at most {MAX_ENTRY_SECONDS // 86400} days ago.")
         return
     if end <= start:
         raise ApiError(400, "End must be after start.")
@@ -443,7 +461,11 @@ def api_add_entry(body: dict) -> dict:
 
 
 def api_patch_entry(eid: int, body: dict) -> dict:
-    """Change start, end, activity and/or client. A running entry stays running (its end cannot be set here)."""
+    """Change start, end, activity and/or client. A running entry stays running (its end cannot be set here).
+
+    Times are validated only when they change: a timer stopped after more than 7 days is
+    still a real entry, and its activity or client can be edited without shortening it.
+    """
     with WRITE_LOCK, db() as con:
         r = get_entry(con, eid)
         if not r:
@@ -452,8 +474,9 @@ def api_patch_entry(eid: int, body: dict) -> dict:
         if "end" in body and r["end_ts"] is None:
             raise ApiError(400, "Stop the timer before editing the end.")
         end = timestamp(body["end"], "end") if "end" in body else r["end_ts"]
-        check_interval(start, end)
-        check_overlap(con, start, end, eid)
+        if "start" in body or "end" in body:
+            check_interval(start, end)
+            check_overlap(con, start, end, eid)
         activity = activity_text(body["activity"]) if "activity" in body else r["activity"]
         cid = r["client_id"]
         if "client_id" in body and body["client_id"] != cid:   # moving: the target must be active
@@ -613,7 +636,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 - last resort: log details, show a generic message
             log.exception("Unhandled error for %s %s", method, self.path)
             self._discard_body()
-            self._send(500, {"error": "Server error. Details are in timetracker.log."})
+            self._send(500, {"error": f"Server error. Details are in {os.path.basename(LOG_PATH)}."})
 
     def _discard_body(self) -> None:
         """Read an unread request body before answering an error.
@@ -650,9 +673,16 @@ if __name__ == "__main__":
     logging.basicConfig(filename=LOG_PATH, level=logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s")
     # Take the port first: a second copy of the server stops here, before it touches the database.
-    srv = make_server()
-    init_db()
-    print(f"TimeTracker running on http://localhost:{PORT}  (Ctrl+C to stop)")
+    try:
+        srv = make_server()
+        init_db()
+    except Exception:  # noqa: BLE001 - under pythonw.exe there is no console, so the log is the only trace
+        log.exception("Server could not start")
+        raise SystemExit(1)
+    url = f"http://localhost:{PORT}"
+    print(f"TimeTracker running on {url}  (Ctrl+C to stop)")
+    if "--open" in sys.argv[1:]:   # start.bat: open the browser once the port is listening
+        webbrowser.open(url)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

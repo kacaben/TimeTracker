@@ -18,7 +18,7 @@ Open **http://localhost:8765** in a browser. The server listens on `127.0.0.1` o
 
 ## Run manually
 
-Double-click `start.bat`, or:
+Double-click `start.bat` (it opens the browser once the server is ready), or:
 
 ```powershell
 python server.py
@@ -78,7 +78,7 @@ Meant for a single user on their own PC:
 - Listens on `127.0.0.1` only, and answers only requests addressed to `localhost` (blocks DNS rebinding).
 - Write requests must be JSON and may not come from a foreign `Origin`, so other websites cannot change your data.
 - No login: any program or user on the same PC can reach the API. Do not expose the port to a network.
-- Unexpected errors are written to `timetracker.log` next to `server.py` (override with `TT_LOG`).
+- Unexpected errors, including a failed start, are written to `timetracker.log` next to `server.py` (override with `TT_LOG`).
 
 ## Clients
 
@@ -101,7 +101,7 @@ Databases from before clients existed are upgraded automatically on the first st
 - Holidays count as workdays; weekend work counts as worked time but adds no target.
 - Daily hours changes apply from the chosen date onward; earlier days keep their previous value.
 - Date picker library: flatpickr 4.6.13 (MIT), stored in `vendor/flatpickr/` so the app works offline.
-- Entries must be between the years 2000 and 2100 and at most 7 days long (catches typos).
+- Typed or edited times must be between the years 2000 and 2100 and an entry at most 7 days long (catches typos). A timer you forgot to stop is saved as it is, however long; fix its times with **Edit**.
 
 ## License
 

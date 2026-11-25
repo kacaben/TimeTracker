@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-start "" http://localhost:8765
-python server.py
+rem Opens the browser itself once the server is listening.
+python server.py --open

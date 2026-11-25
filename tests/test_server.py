@@ -346,6 +346,7 @@ class AddEntryTest(DbTestCase):
             "no client": {"client_id": None, "start": ts(2026, 11, 3, 9), "end": ts(2026, 11, 3, 10)},
             "client as text": {"client_id": "1", "start": ts(2026, 11, 3, 9), "end": ts(2026, 11, 3, 10)},
             "huge client id": {"client_id": 2**70, "start": ts(2026, 11, 3, 9), "end": ts(2026, 11, 3, 10)},
+            "huge integer": {"start": 10**400, "end": ts(2026, 11, 3, 9)},   # float() would overflow
         }
         for name, body in cases.items():
             with self.subTest(name):
@@ -461,6 +462,19 @@ class PatchEntryTest(DbTestCase):
         self.assertApiError(400, server.api_patch_entry, run["id"], {"start": time.time() + 3600})
         moved = server.api_patch_entry(run["id"], {"start": time.time() - 600})
         self.assertIsNone(moved["end"])
+        # Moving the start years back would create a huge entry on stop.
+        self.assertApiError(400, server.api_patch_entry, run["id"], {"start": time.time() - 8 * 86400})
+
+    def test_long_stopped_timer_can_still_be_edited(self):
+        # A timer forgotten over a holiday and stopped after 8 days is longer than manual entries
+        # may be; renaming it or moving it to another client must still work.
+        b = self.new_client("B")
+        with server.db() as con:
+            eid = con.execute("INSERT INTO entries (client_id, start_ts, end_ts) VALUES (?, ?, ?)",
+                              (C1, ts(2026, 10, 1, 9), ts(2026, 10, 9, 9))).lastrowid
+        self.assertEqual(server.api_patch_entry(eid, {"activity": "holiday"})["activity"], "holiday")
+        self.assertEqual(server.api_patch_entry(eid, {"client_id": b})["client_id"], b)
+        self.assertApiError(400, server.api_patch_entry, eid, {"end": ts(2026, 10, 9, 10)})   # changing times is checked
 
     def test_delete(self):
         server.api_delete_entry(self.e1["id"])
@@ -483,7 +497,7 @@ class SettingsTest(DbTestCase):
                 self.assertApiError(400, self.put, daily_hours=6, effective_from=bad)
 
     def test_rejects_bad_hours(self):
-        for bad in [0, -1, 25, None, "8", float("nan"), True]:
+        for bad in [0, -1, 25, None, "8", float("nan"), True, 10**400]:
             with self.subTest(bad=bad):
                 self.assertApiError(400, self.put, daily_hours=bad)
 
@@ -546,8 +560,21 @@ class HttpTest(DbTestCase):
             with self.subTest(path=path):
                 r, _ = self.request(method, path, {"name": "X", **body}, headers={"Origin": "https://evil.example"})
                 self.assertEqual(r.status, 403)
+        r, _ = self.request("POST", "/api/toggle", body, headers={"Origin": "null"})   # sandboxed iframe, file://
+        self.assertEqual(r.status, 403)
         r, _ = self.request("POST", "/api/toggle", body, headers={"Origin": f"http://localhost:{self.port}"})
         self.assertEqual(r.status, 200)
+        r, _ = self.request("POST", "/api/toggle", body)   # no Origin header (curl, scripts) is allowed
+        self.assertEqual(r.status, 200)
+
+    def test_missing_host_is_rejected(self):
+        con = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        con.putrequest("GET", "/api/summary", skip_host=True)
+        con.endheaders()
+        r = con.getresponse()
+        r.read()
+        con.close()
+        self.assertEqual(r.status, 403)
 
     def test_writes_require_json(self):   # CSRF: HTML forms cannot send application/json
         for method, path in [("POST", "/api/toggle"), ("DELETE", "/api/entries/1"), ("PUT", "/api/settings"),

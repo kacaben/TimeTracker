@@ -258,7 +258,7 @@ function renderDays() {
     tr.className = 'day' + (d.weekday >= 5 ? ' weekend' : '') + (d.date === S.today ? ' today' : '') + (d.date === selDay ? ' sel' : '');
     const cells = [`${DAY[d.weekday]} ${d.date.slice(8)}.${d.date.slice(5,7)}.`, d.worked ? hm(d.worked) : '', d.target ? hm(d.target) : '', d.target || d.worked ? hm(d.worked - d.target) : ''];
     cells.forEach((c, i) => { const td = document.createElement('td'); td.textContent = c; if (i) td.className = 'n'; tr.appendChild(td); });
-    tr.onclick = () => { selDay = d.date; renderDays(); renderEntries(); $('entriesCard').scrollIntoView({ behavior:'smooth', block:'nearest' }); };
+    tr.onclick = () => { selDay = d.date; setDT($('addStart'), ''); setDT($('addEnd'), ''); renderDays(); renderEntries(); $('entriesCard').scrollIntoView({ behavior:'smooth', block:'nearest' }); };
     tb.appendChild(tr);
   }
 }
