@@ -50,12 +50,26 @@
   input.dt { width:150px; font-variant-numeric:tabular-nums; }
   #error { color:var(--stop); min-height:1.2em; font-size:13px; }
   .empty { color:var(--muted); padding:6px 0; }
+  .head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+  .head .todaydate { margin-bottom:0; }
+  select { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+  #client { font-weight:600; min-width:160px; }
+  #toggle.switch { background:var(--warn); }
+  #toggle:disabled, button.small:disabled { opacity:.5; cursor:not-allowed; }
 </style>
 </head>
 <body>
 <main>
   <section class="card">
-    <div class="todaydate" id="todaydate"></div>
+    <div class="head">
+      <div class="todaydate" id="todaydate"></div>
+      <div class="row">
+        <select id="client" aria-label="Client"></select>
+        <button class="small" id="newClient">New client</button>
+        <button class="small" id="renameClient">Rename</button>
+        <button class="small" id="archiveClient">Archive</button>
+      </div>
+    </div>
     <div class="tracker">
       <button id="toggle">Start</button>
       <div>
@@ -80,7 +94,7 @@
   </section>
 
   <section class="card">
-    <h2>Month</h2>
+    <h2 id="monthtitle">Month</h2>
     <div class="monthnav">
       <button class="small" id="prev">&larr;</button>
       <strong id="monthlabel"></strong>
@@ -118,6 +132,11 @@ let S = null;            // last summary
 let fetchedAt = 0;       // Date.now() when S was fetched
 let month = ymd(new Date()).slice(0, 7);
 let selDay = ymd(new Date());
+let clientId = savedClient();   // selected client; null = let the server pick the first active one
+
+// Remember the selected client in this browser (optional: works without storage, e.g. private windows).
+function savedClient() { try { return parseInt(localStorage.getItem('tt.client'), 10) || null; } catch { return null; } }
+function saveClient(id) { try { localStorage.setItem('tt.client', String(id)); } catch { /* ignore */ } }
 
 function pad(n) { return String(n).padStart(2, '0'); }
 function ymd(d) { return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
@@ -158,26 +177,57 @@ function showError(e) { $('error').textContent = e ? (e.message || e) : ''; }
 async function guard(fn) { try { showError(''); await fn(); } catch (e) { showError(e); } }
 
 async function load() {
-  S = await api('GET', '/api/summary?month=' + month);
+  const url = '/api/summary?month=' + month + (clientId ? '&client=' + clientId : '');
+  try {
+    S = await api('GET', url);
+  } catch (e) {
+    if (clientId && e.message === 'Client not found.') { clientId = null; return load(); }   // stale saved id
+    throw e;
+  }
+  clientId = S.client.id; saveClient(clientId);
   fetchedAt = Date.now();
   render();
 }
 
-function liveExtra() { return S.running && month === S.today.slice(0,7) ? (Date.now() - fetchedAt)/1000 : 0; }
+function clientName(id) { const c = S.clients.find(x => x.id === id); return c ? c.name : '?'; }
+function runningHere() { return !!S.running && S.running.client_id === clientId; }   // timer runs for the selected client
+function liveExtra() { return runningHere() && month === S.today.slice(0,7) ? (Date.now() - fetchedAt)/1000 : 0; }
 
 function render() {
-  const running = S.running;
-  $('toggle').textContent = running ? 'Stop' : 'Start';
-  $('toggle').classList.toggle('running', !!running);
-  if (document.activeElement !== $('activity')) $('activity').value = running ? running.activity : $('activity').value;
+  const running = S.running, here = runningHere(), archived = S.client.archived;
+  renderClients();
+  // Start / Stop / Switch here: one timer for all clients; starting for another client stops the running one.
+  $('toggle').textContent = here ? 'Stop' : running ? 'Switch here' : 'Start';
+  $('toggle').classList.toggle('running', here);
+  $('toggle').classList.toggle('switch', !!running && !here);
+  $('toggle').disabled = archived && !here;
+  $('toggle').title = archived && !here ? 'This client is archived' : running && !here ? `Stops the timer for ${clientName(running.client_id)} and starts it for ${S.client.name}` : '';
+  $('addBtn').disabled = archived;
+  if (here && document.activeElement !== $('activity')) $('activity').value = running.activity;
   $('todaydate').textContent = new Date(S.today + 'T00:00').toLocaleDateString('en-GB', { weekday:'long' }) + ', ' + eu(S.today);
-  $('runinfo').textContent = running ? `Started ${clock(running.start)}` : 'Not running';
+  $('runinfo').textContent = !running ? 'Not running'
+    : here ? `Started ${clock(running.start)}` : `Running for ${clientName(running.client_id)} since ${clock(running.start)}`;
+  $('monthtitle').textContent = `Month · ${S.client.name}`;
   $('monthlabel').textContent = new Date(month + '-01T00:00').toLocaleDateString('en-GB', { month:'long', year:'numeric' });
   if (document.activeElement !== $('dailyhours')) $('dailyhours').value = S.daily_hours;
   $('sLeft').textContent = ` (${S.remaining_workdays} days)`;
   renderDays();
   renderEntries();
   tick();
+}
+
+function renderClients() {
+  const sel = $('client'); sel.innerHTML = '';
+  const active = S.clients.filter(c => !c.archived), archived = S.clients.filter(c => c.archived);
+  const option = c => Object.assign(document.createElement('option'), { value: c.id, textContent: c.name });
+  active.forEach(c => sel.appendChild(option(c)));
+  if (archived.length) {
+    const group = Object.assign(document.createElement('optgroup'), { label: 'Archived' });
+    archived.forEach(c => group.appendChild(option(c)));
+    sel.appendChild(group);
+  }
+  sel.value = clientId;
+  $('archiveClient').textContent = S.client.archived ? 'Restore' : 'Archive';
 }
 
 function tick() {   // cheap live update; no network
@@ -198,7 +248,7 @@ function tick() {   // cheap live update; no network
     todayRow.children[1].textContent = hm(d.worked + extra);
     todayRow.children[3].textContent = hm(d.worked + extra - d.target);
   }
-  document.title = run ? `▶ ${hms(Date.now()/1000 - run.start)} · TimeTracker` : 'TimeTracker';
+  document.title = run ? `▶ ${hms(Date.now()/1000 - run.start)} · ${clientName(run.client_id)}` : 'TimeTracker';
 }
 
 function renderDays() {
@@ -247,31 +297,70 @@ function editRow(div, e) {
   const s = Object.assign(document.createElement('input'), { type:'text', className:'dt', placeholder:'DD.MM.YYYY HH:MM', value: toInput(e.start) });
   const en = Object.assign(document.createElement('input'), { type:'text', className:'dt', placeholder:'DD.MM.YYYY HH:MM', value: e.end ? toInput(e.end) : '', disabled: !e.end, title: e.end ? '' : 'Stop the timer to edit the end' });
   const a = Object.assign(document.createElement('input'), { type:'text', value: e.activity, placeholder:'Activity', className:'grow', maxLength: 200 });
+  const c = Object.assign(document.createElement('select'), { title: 'Move this entry to another client' });
+  for (const cl of S.clients.filter(x => !x.archived || x.id === e.client_id))
+    c.appendChild(Object.assign(document.createElement('option'), { value: cl.id, textContent: cl.name }));
+  c.value = e.client_id;
   picker(s); if (e.end) picker(en);
   const save = btn('Save', () => guard(async () => {
     const body = {};
     if (s.value !== toInput(e.start)) body.start = fromInput(s.value);   // untouched fields keep their seconds
     if (e.end && en.value !== toInput(e.end)) body.end = fromInput(en.value);
     if (a.value !== e.activity) body.activity = a.value;
+    if (+c.value !== e.client_id) body.client_id = +c.value;
     if (Object.keys(body).length) await api('PATCH', '/api/entries/' + e.id, body);
     await load();
   }));
-  div.append(s, en, a, save, btn('Cancel', renderEntries));
+  div.append(s, en, a, c, save, btn('Cancel', renderEntries));
 }
 
 $('toggle').onclick = () => guard(async () => {
-  const entry = await api('POST', '/api/toggle', { activity: $('activity').value });
-  if (entry.end !== null) $('activity').value = '';   // the server stopped the timer
-  await load();
+  $('toggle').disabled = true;   // no double clicks while the request runs; render() sets it again
+  try {
+    // running_id = the timer this page shows; the server refuses the click if it changed meanwhile.
+    const r = await api('POST', '/api/toggle', { client_id: clientId, activity: $('activity').value, running_id: S.running ? S.running.id : null });
+    if (!r.started) $('activity').value = '';   // the timer was stopped (not switched)
+  } finally {
+    await load().catch(() => render());
+  }
 });
-$('activity').addEventListener('change', () => { if (S && S.running) guard(async () => { await api('PATCH', '/api/entries/' + S.running.id, { activity: $('activity').value }); await load(); }); });
+$('activity').addEventListener('change', () => { if (S && runningHere()) guard(async () => { await api('PATCH', '/api/entries/' + S.running.id, { activity: $('activity').value }); await load(); }); });
 $('addBtn').onclick = () => guard(async () => {
-  await api('POST', '/api/entries', { start: fromInput($('addStart').value), end: fromInput($('addEnd').value), activity: $('addAct').value });
+  await api('POST', '/api/entries', { client_id: clientId, start: fromInput($('addStart').value), end: fromInput($('addEnd').value), activity: $('addAct').value });
   $('addAct').value = '';
   await load();
 });
 $('savehours').onclick = () => guard(async () => {
-  await api('PUT', '/api/settings', { daily_hours: parseFloat($('dailyhours').value), effective_from: fromDate($('hoursfrom').value) });
+  await api('PUT', '/api/settings', { client_id: clientId, daily_hours: parseFloat($('dailyhours').value), effective_from: fromDate($('hoursfrom').value) });
+  await load();
+});
+
+// ---- clients
+$('client').onchange = () => {
+  clientId = +$('client').value; saveClient(clientId);
+  $('activity').value = '';   // the activity text belongs to the previous client
+  guard(load);
+};
+$('newClient').onclick = () => guard(async () => {
+  const name = prompt('Name of the new client:');
+  if (!name || !name.trim()) return;
+  const hours = prompt(`Daily hours for ${name.trim()}:`, '8');
+  if (hours === null) return;
+  const c = await api('POST', '/api/clients', { name, daily_hours: parseFloat(hours.replace(',', '.')) });
+  clientId = c.id; saveClient(clientId); $('activity').value = '';
+  await load();
+});
+$('renameClient').onclick = () => guard(async () => {
+  const name = prompt('New name:', S.client.name);
+  if (!name || name.trim() === S.client.name) return;
+  await api('PATCH', '/api/clients/' + clientId, { name });
+  await load();
+});
+$('archiveClient').onclick = () => guard(async () => {
+  if (S.client.archived) { await api('PATCH', '/api/clients/' + clientId, { archived: false }); return load(); }
+  if (!confirm(`Archive ${S.client.name}? Its data is kept; you can restore it from the "Archived" group in the client list.`)) return;
+  await api('PATCH', '/api/clients/' + clientId, { archived: true });
+  clientId = null; $('activity').value = '';   // the server picks the first active client
   await load();
 });
 function gotoMonth(m) { month = m; selDay = m === ymd(new Date()).slice(0,7) ? ymd(new Date()) : m + '-01'; setDT($('addStart'), ''); setDT($('addEnd'), ''); guard(load); }

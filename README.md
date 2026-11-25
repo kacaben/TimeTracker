@@ -2,12 +2,13 @@
 
 [![tests](https://github.com/kacaben/TimeTracker/actions/workflows/tests.yml/badge.svg)](https://github.com/kacaben/TimeTracker/actions/workflows/tests.yml)
 
-Personal start/stop time tracker. Python standard library only (no `pip install`), SQLite storage, single-page UI.
+Personal start/stop time tracker for several clients. Python standard library only (no `pip install`), SQLite storage, single-page UI.
 
 ![TimeTracker: start/stop timer, entries for the selected day, and the monthly overview with worked, target and missing hours](docs/screenshot.png)
 
 - One-click start/stop timer, manual entries, editing, per-day entry list.
-- Monthly overview: worked vs. target hours, overtime, and hours needed per remaining workday.
+- Several clients, each with its own entries and daily hours. One timer: starting it for another client stops the running one.
+- Monthly overview per client: worked vs. target hours, overtime, and hours needed per remaining workday.
 - Daily-hours target with history: a change applies from a chosen date, past months stay as they were.
 - Runs fully offline on your own PC; data stays in a local SQLite file.
 
@@ -79,9 +80,20 @@ Meant for a single user on their own PC:
 - No login: any program or user on the same PC can reach the API. Do not expose the port to a network.
 - Unexpected errors are written to `timetracker.log` next to `server.py` (override with `TT_LOG`).
 
+## Clients
+
+- Pick the client at the top right. The entries, month overview and daily hours below are for that client. The browser remembers your choice.
+- **New client** asks for a name and daily hours. Its daily hours apply to all dates until you set a change with *valid from*.
+- **Start** starts the timer for the selected client. If the timer runs for another client, the button says **Switch here**: it stops that timer and starts this one at the same second.
+- Time can't overlap between clients: you can't work for two at once, so double billing is impossible.
+- **Edit** on an entry can move it to another client.
+- **Archive** hides a finished client: its data stays, it appears in the *Archived* group of the list, and it can't get new time until you **Restore** it. Its existing entries can still be corrected or moved to another client.
+
 ## Data and backup
 
 All data is in `timetracker.db` (SQLite) in this folder. Back up that file.
+
+Databases from before clients existed are upgraded automatically on the first start: all entries and daily hours move to a client named *Client 1* (rename it in the app). A copy of the old file is saved first as `timetracker.before-clients.db`.
 
 ## Notes
 

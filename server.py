@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TimeTracker: personal start/stop time tracker. Stdlib only (no pip install).
+"""TimeTracker: personal start/stop time tracker for several clients. Stdlib only (no pip install).
 
 Run:  python server.py   ->  http://localhost:8765
 Data: timetracker.db (SQLite) next to this file. Override with TT_DB / TT_PORT.
@@ -15,7 +15,7 @@ import re
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
@@ -26,12 +26,18 @@ DB_PATH = os.environ.get("TT_DB", os.path.join(HERE, "timetracker.db"))
 LOG_PATH = os.environ.get("TT_LOG", os.path.join(HERE, "timetracker.log"))
 PORT = int(os.environ.get("TT_PORT", "8765"))
 
+SCHEMA_VERSION = 2                    # 1 (implicit, user_version 0): single client. 2: clients table.
+DEFAULT_CLIENT = "Client 1"
+DEFAULT_DAILY_HOURS = 8.0
 FAR_FUTURE = 1e18                     # stands in for "no end yet" in SQL comparisons
 MIN_TS = datetime(2000, 1, 1).timestamp()
 MAX_TS = datetime(2100, 1, 1).timestamp()
 MAX_ENTRY_SECONDS = 7 * 86400         # longer entries are almost certainly typos
 MAX_ACTIVITY_LEN = 200
+MAX_CLIENT_NAME_LEN = 60
 MAX_BODY_BYTES = 64 * 1024
+MAX_ID = 10**15                       # ids beyond this are invalid input (SQLite integers end at 2**63)
+ID_RE = re.compile(r"[0-9]{1,15}")    # ASCII digits only: '²'.isdigit() is True but int('²') fails
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 WRITE_LOCK = threading.Lock()
 
@@ -60,28 +66,114 @@ def db() -> Iterator[sqlite3.Connection]:
         con.close()
 
 
+SCHEMA = """
+CREATE TABLE clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    archived INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    start_ts REAL NOT NULL,
+    end_ts REAL,                           -- NULL while the timer runs
+    activity TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE settings (
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    effective_from TEXT NOT NULL,          -- YYYY-MM-DD
+    daily_hours REAL NOT NULL,
+    PRIMARY KEY (client_id, effective_from)
+);
+"""
+
+# Version 1 had no clients: all entries and settings move to the first client.
+MIGRATE_1_TO_2 = """
+CREATE TABLE clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    archived INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO clients (id, name) VALUES (1, :name);
+ALTER TABLE entries ADD COLUMN client_id INTEGER NOT NULL DEFAULT 1 REFERENCES clients(id);
+CREATE TABLE settings_v2 (
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    effective_from TEXT NOT NULL,
+    daily_hours REAL NOT NULL,
+    PRIMARY KEY (client_id, effective_from)
+);
+INSERT INTO settings_v2 SELECT 1, effective_from, daily_hours FROM settings;
+DROP TABLE settings;
+ALTER TABLE settings_v2 RENAME TO settings;
+"""
+
+
+def backup_path(path: str) -> str:
+    root, ext = os.path.splitext(path)
+    return f"{root}.before-clients{ext or '.db'}"
+
+
 def init_db() -> None:
+    """Create the schema, or upgrade an older database in place (after saving a copy).
+
+    Everything happens under one write lock (BEGIN IMMEDIATE): the version is read, the backup taken
+    and the upgrade done while no other process can write, and an error rolls all of it back.
+    sqlite3 does not open a transaction for CREATE/ALTER by itself, hence the explicit BEGIN.
+    """
     with db() as con:
-        con.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                start_ts REAL NOT NULL,
-                end_ts REAL,
-                activity TEXT NOT NULL DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS settings (
-                effective_from TEXT PRIMARY KEY,   -- YYYY-MM-DD
-                daily_hours REAL NOT NULL
-            );
-            """
-        )
-        if not con.execute("SELECT 1 FROM settings").fetchone():
-            con.execute("INSERT INTO settings VALUES ('1970-01-01', 8)")
+        con.execute("BEGIN IMMEDIATE")
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(f"{DB_PATH} was written by a newer TimeTracker (schema {version}, "
+                               f"this code knows {SCHEMA_VERSION}). Update the code; the file was not changed.")
+        has_entries = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entries'").fetchone()
+        if version < SCHEMA_VERSION and has_entries:
+            # A second connection may read while we hold the write lock, so the copy is consistent.
+            with closing(sqlite3.connect(DB_PATH)) as src, closing(sqlite3.connect(backup_path(DB_PATH))) as dst:
+                src.backup(dst)
+            for stmt in split_sql(MIGRATE_1_TO_2):
+                con.execute(stmt, {"name": DEFAULT_CLIENT} if ":name" in stmt else {})
+        elif version < SCHEMA_VERSION:
+            for stmt in split_sql(SCHEMA):
+                con.execute(stmt)
+        con.execute("CREATE INDEX IF NOT EXISTS entries_by_client ON entries (client_id, start_ts)")
+        if version != SCHEMA_VERSION:
+            con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        if not con.execute("SELECT 1 FROM clients").fetchone():
+            insert_client(con, DEFAULT_CLIENT, DEFAULT_DAILY_HOURS)
+        # Every client needs a daily-hours value (an old database could have had no settings row).
+        con.execute("INSERT INTO settings SELECT id, '1970-01-01', ? FROM clients "
+                    "WHERE id NOT IN (SELECT client_id FROM settings)", (DEFAULT_DAILY_HOURS,))
+
+
+def split_sql(script: str) -> list[str]:
+    """Split a script into statements, so they run inside one transaction (executescript would commit).
+
+    Only for the simple scripts in this file: no ';' or '--' inside string literals.
+    Note: MIGRATE_1_TO_2 adds a column with REFERENCES and a default, which SQLite allows only
+    while foreign keys are off (its default); db() must not turn them on.
+    """
+    lines = [ln.split("--")[0] for ln in script.splitlines()]
+    return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
+
+
+def insert_client(con: sqlite3.Connection, name: str, daily_hours: float) -> int:
+    try:
+        cid = con.execute("INSERT INTO clients (name) VALUES (?)", (name,)).lastrowid
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "A client with this name already exists.") from None
+    con.execute("INSERT INTO settings VALUES (?, '1970-01-01', ?)", (cid, daily_hours))
+    return cid
 
 
 def entry_json(r: sqlite3.Row) -> dict:
-    return {"id": r["id"], "start": r["start_ts"], "end": r["end_ts"], "activity": r["activity"]}
+    return {"id": r["id"], "client_id": r["client_id"], "start": r["start_ts"], "end": r["end_ts"],
+            "activity": r["activity"]}
+
+
+def client_json(r: sqlite3.Row) -> dict:
+    return {"id": r["id"], "name": r["name"], "archived": bool(r["archived"])}
 
 
 def get_entry(con: sqlite3.Connection, eid: int) -> sqlite3.Row | None:
@@ -89,18 +181,25 @@ def get_entry(con: sqlite3.Connection, eid: int) -> sqlite3.Row | None:
 
 
 def get_running(con: sqlite3.Connection) -> sqlite3.Row | None:
+    """The one running entry, for any client."""
     return con.execute("SELECT * FROM entries WHERE end_ts IS NULL").fetchone()
 
 
+def list_clients(con: sqlite3.Connection) -> list[dict]:
+    return [client_json(r) for r in
+            con.execute("SELECT * FROM clients ORDER BY archived, name COLLATE NOCASE")]
+
+
 def check_overlap(con: sqlite3.Connection, start: float, end: float | None, exclude_id: int | None = None) -> None:
-    """Reject overlaps: they would double count time. Touching entries are fine."""
+    """Reject overlaps across all clients: you cannot work for two at once. Touching entries are fine."""
     end_eff = FAR_FUTURE if end is None else end
     r = con.execute(
-        "SELECT id FROM entries WHERE id != ? AND start_ts < ? AND COALESCE(end_ts, ?) > ?",
+        "SELECT e.id, c.name FROM entries e JOIN clients c ON c.id = e.client_id "
+        "WHERE e.id != ? AND e.start_ts < ? AND COALESCE(e.end_ts, ?) > ?",
         (exclude_id or -1, end_eff, FAR_FUTURE, start),
     ).fetchone()
     if r:
-        raise ApiError(409, "This entry overlaps another entry.")
+        raise ApiError(409, f"This entry overlaps another entry (client {r['name']}).")
 
 
 # ------------------------------------------------------------------- logic
@@ -123,7 +222,7 @@ def split_by_day(start: float, end: float) -> Iterator[tuple[date, float]]:
 
 def daily_hours_for(history: list[tuple[str, float]], d: date) -> float:
     """history: (effective_from 'YYYY-MM-DD', hours) sorted ascending; the last one on or before d wins."""
-    h = history[0][1]
+    h = history[0][1] if history else 0.0
     day = d.isoformat()
     for eff, hours in history:
         if eff <= day:
@@ -141,19 +240,21 @@ def parse_month(month: str) -> tuple[date, date]:
         raise ApiError(400, "month must be YYYY-MM") from None
 
 
-def month_summary(con: sqlite3.Connection, month: str) -> dict:
+def month_summary(con: sqlite3.Connection, month: str, client_id: int) -> dict:
+    """Everything the page shows for one client and month. 'running' is the timer of any client."""
+    client = client_row(con, client_id)
     first, nxt_first = parse_month(month)
     y, m = first.year, first.month
     ms, me = local_midnight(first), local_midnight(nxt_first)
     now = time.time()
     today = datetime.fromtimestamp(now).date()
 
-    history = [(r["effective_from"], r["daily_hours"]) for r in
-               con.execute("SELECT * FROM settings ORDER BY effective_from")]
+    history = [(r["effective_from"], r["daily_hours"]) for r in con.execute(
+        "SELECT * FROM settings WHERE client_id=? ORDER BY effective_from", (client_id,))]
 
     rows = con.execute(
-        "SELECT * FROM entries WHERE start_ts < ? AND COALESCE(end_ts, ?) > ? ORDER BY start_ts",
-        (me, FAR_FUTURE, ms),
+        "SELECT * FROM entries WHERE client_id=? AND start_ts < ? AND COALESCE(end_ts, ?) > ? ORDER BY start_ts",
+        (client_id, me, FAR_FUTURE, ms),
     ).fetchall()
     worked: dict[date, float] = {}
     for r in rows:
@@ -180,6 +281,8 @@ def month_summary(con: sqlite3.Connection, month: str) -> dict:
     running = get_running(con)
     return {
         "month": f"{y:04d}-{m:02d}",
+        "client": client_json(client),
+        "clients": list_clients(con),
         "today": today.isoformat(),
         "server_time": now,
         "worked": worked_total,
@@ -209,11 +312,36 @@ def timestamp(v, name: str) -> float:
     return ts
 
 
+def daily_hours_value(v) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not 0 < v <= 24:
+        raise ApiError(400, "daily_hours must be between 0 and 24.")
+    return float(v)
+
+
 def activity_text(v) -> str:
     text = str(v or "").strip()
     if len(text) > MAX_ACTIVITY_LEN:
         raise ApiError(400, f"Activity must be at most {MAX_ACTIVITY_LEN} characters.")
     return text
+
+
+def client_name(v) -> str:
+    name = v.strip() if isinstance(v, str) else ""
+    if not 1 <= len(name) <= MAX_CLIENT_NAME_LEN:
+        raise ApiError(400, f"Client name must be 1 to {MAX_CLIENT_NAME_LEN} characters.")
+    return name
+
+
+def client_row(con: sqlite3.Connection, v, active: bool = False) -> sqlite3.Row:
+    """Look up a client by id; with active=True, archived clients are refused."""
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 < v <= MAX_ID:
+        raise ApiError(400, "client_id must be a client number.")
+    r = con.execute("SELECT * FROM clients WHERE id=?", (v,)).fetchone()
+    if not r:
+        raise ApiError(404, "Client not found.")
+    if active and r["archived"]:
+        raise ApiError(400, f"Client {r['name']} is archived. Restore it first.")
+    return r
 
 
 def check_interval(start: float, end: float | None) -> None:
@@ -228,22 +356,78 @@ def check_interval(start: float, end: float | None) -> None:
 
 
 # --------------------------------------------------------------- endpoints
+def api_list_clients() -> list[dict]:
+    with db() as con:
+        return list_clients(con)
+
+
+def api_create_client(body: dict) -> dict:
+    name = client_name(body.get("name"))
+    hours = daily_hours_value(body.get("daily_hours", DEFAULT_DAILY_HOURS))
+    with WRITE_LOCK, db() as con:
+        cid = insert_client(con, name, hours)
+        return client_json(client_row(con, cid))
+
+
+def api_patch_client(cid: int, body: dict) -> dict:
+    """Rename and/or archive (archived: true) or restore (archived: false) a client."""
+    with WRITE_LOCK, db() as con:
+        r = client_row(con, cid)
+        name = client_name(body["name"]) if "name" in body else r["name"]
+        archived = r["archived"]
+        if "archived" in body:
+            if not isinstance(body["archived"], bool):
+                raise ApiError(400, "archived must be true or false.")
+            archived = int(body["archived"])
+            run = get_running(con)
+            if archived and run and run["client_id"] == cid:
+                raise ApiError(400, "Stop the timer before archiving this client.")
+        try:
+            con.execute("UPDATE clients SET name=?, archived=? WHERE id=?", (name, archived, cid))
+        except sqlite3.IntegrityError:
+            raise ApiError(409, "A client with this name already exists.") from None
+        return client_json(client_row(con, cid))
+
+
 def api_toggle(body: dict) -> dict:
-    """Stop the running entry, or start a new one if nothing runs."""
+    """Start/stop button.
+
+    - Nothing runs: start a timer for client_id.
+    - The timer runs for client_id (or client_id is omitted): stop it; a non-empty activity is saved on it.
+    - The timer runs for another client: stop that one and start one for client_id (switch).
+    The page sends running_id: the running entry it showed (null if none). If the timer changed
+    meanwhile (another tab, a double click), the click is refused with 409 instead of doing the
+    opposite of what the button said.
+    Returns {"stopped": entry or None, "started": entry or None}.
+    """
     activity = activity_text(body.get("activity"))
     with WRITE_LOCK, db() as con:
+        cid = client_row(con, body["client_id"])["id"] if body.get("client_id") is not None else None
         run = get_running(con)
+        if "running_id" in body and body["running_id"] != (run["id"] if run else None):
+            raise ApiError(409, "The timer was changed meanwhile (another tab?). The page is up to date now; click again.")
         now = time.time()
-        if run:
+        stopped = started = None
+        if run and cid in (None, run["client_id"]):
             if activity:
                 con.execute("UPDATE entries SET activity=? WHERE id=?", (activity, run["id"]))
-            con.execute("UPDATE entries SET end_ts=? WHERE id=?", (max(now, run["start_ts"]), run["id"]))
-            eid = run["id"]
+            stopped = stop_entry(con, run, now)
         else:
+            if cid is None:
+                raise ApiError(400, "client_id is required to start the timer.")
+            client_row(con, cid, active=True)
+            if run:
+                stopped = stop_entry(con, run, now)
             check_overlap(con, now, None)
-            eid = con.execute("INSERT INTO entries (start_ts, activity) VALUES (?, ?)",
-                              (now, activity)).lastrowid
-        return entry_json(get_entry(con, eid))
+            started = con.execute("INSERT INTO entries (client_id, start_ts, activity) VALUES (?, ?, ?)",
+                                  (cid, now, activity)).lastrowid
+        return {"stopped": entry_json(get_entry(con, stopped)) if stopped else None,
+                "started": entry_json(get_entry(con, started)) if started else None}
+
+
+def stop_entry(con: sqlite3.Connection, run: sqlite3.Row, now: float) -> int:
+    con.execute("UPDATE entries SET end_ts=? WHERE id=?", (max(now, run["start_ts"]), run["id"]))
+    return run["id"]
 
 
 def api_add_entry(body: dict) -> dict:
@@ -251,14 +435,15 @@ def api_add_entry(body: dict) -> dict:
     check_interval(start, end)
     activity = activity_text(body.get("activity"))
     with WRITE_LOCK, db() as con:
+        cid = client_row(con, body.get("client_id"), active=True)["id"]
         check_overlap(con, start, end)
-        eid = con.execute("INSERT INTO entries (start_ts, end_ts, activity) VALUES (?, ?, ?)",
-                          (start, end, activity)).lastrowid
+        eid = con.execute("INSERT INTO entries (client_id, start_ts, end_ts, activity) VALUES (?, ?, ?, ?)",
+                          (cid, start, end, activity)).lastrowid
         return entry_json(get_entry(con, eid))
 
 
 def api_patch_entry(eid: int, body: dict) -> dict:
-    """Change start, end and/or activity. A running entry stays running (its end cannot be set here)."""
+    """Change start, end, activity and/or client. A running entry stays running (its end cannot be set here)."""
     with WRITE_LOCK, db() as con:
         r = get_entry(con, eid)
         if not r:
@@ -270,8 +455,11 @@ def api_patch_entry(eid: int, body: dict) -> dict:
         check_interval(start, end)
         check_overlap(con, start, end, eid)
         activity = activity_text(body["activity"]) if "activity" in body else r["activity"]
-        con.execute("UPDATE entries SET start_ts=?, end_ts=?, activity=? WHERE id=?",
-                    (start, end, activity, eid))
+        cid = r["client_id"]
+        if "client_id" in body and body["client_id"] != cid:   # moving: the target must be active
+            cid = client_row(con, body["client_id"], active=True)["id"]
+        con.execute("UPDATE entries SET client_id=?, start_ts=?, end_ts=?, activity=? WHERE id=?",
+                    (cid, start, end, activity, eid))
         return entry_json(get_entry(con, eid))
 
 
@@ -282,9 +470,8 @@ def api_delete_entry(eid: int) -> dict:
 
 
 def api_put_settings(body: dict) -> dict:
-    hours = num(body.get("daily_hours"), "daily_hours")
-    if not 0 < hours <= 24:
-        raise ApiError(400, "daily_hours must be between 0 and 24.")
+    """Set a client's daily hours from effective_from (default today) onward."""
+    hours = daily_hours_value(body.get("daily_hours"))
     eff = body.get("effective_from") or datetime.now().date().isoformat()
     if not isinstance(eff, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", eff):
         raise ApiError(400, "effective_from must be YYYY-MM-DD.")
@@ -294,14 +481,22 @@ def api_put_settings(body: dict) -> dict:
     except ValueError:
         raise ApiError(400, "effective_from must be YYYY-MM-DD.") from None
     with WRITE_LOCK, db() as con:
-        con.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (eff, hours))
+        cid = client_row(con, body.get("client_id"))["id"]
+        con.execute("INSERT OR REPLACE INTO settings VALUES (?, ?, ?)", (cid, eff, hours))
     return {"ok": True}
 
 
 def api_summary(query: dict) -> dict:
     month = (query.get("month") or [datetime.now().strftime("%Y-%m")])[0]
+    client = (query.get("client") or [""])[0]
     with db() as con:
-        return month_summary(con, month)
+        if client:
+            if not ID_RE.fullmatch(client):
+                raise ApiError(400, "client must be a client number.")
+            cid = int(client)
+        else:  # default: the first client in the list (active ones come first)
+            cid = list_clients(con)[0]["id"]
+        return month_summary(con, month, cid)
 
 
 # ------------------------------------------------------------------ server
@@ -353,6 +548,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "Invalid Content-Length.")
         if n > MAX_BODY_BYTES:
             raise ApiError(413, "Request body too large.")
+        self._body_read = True
         try:
             body = json.loads(self.rfile.read(n) or b"{}", parse_constant=_reject_constant)
         except ValueError:
@@ -379,13 +575,20 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, method: str, path: str, query: dict):
         """Return (status, payload) for an /api/ request."""
         parts = path.strip("/").split("/")[1:]  # drop 'api'
+        has_id = len(parts) == 2 and ID_RE.fullmatch(parts[1]) is not None
         if parts == ["summary"] and method == "GET":
             return 200, api_summary(query)
+        if parts == ["clients"] and method == "GET":
+            return 200, api_list_clients()
+        if parts == ["clients"] and method == "POST":
+            return 201, api_create_client(self._read_json())
+        if has_id and parts[0] == "clients" and method == "PATCH":
+            return 200, api_patch_client(int(parts[1]), self._read_json())
         if parts == ["toggle"] and method == "POST":
             return 200, api_toggle(self._read_json())
         if parts == ["entries"] and method == "POST":
             return 201, api_add_entry(self._read_json())
-        if len(parts) == 2 and parts[0] == "entries" and parts[1].isdigit():
+        if has_id and parts[0] == "entries":
             if method == "PATCH":
                 return 200, api_patch_entry(int(parts[1]), self._read_json())
             if method == "DELETE":
@@ -405,10 +608,28 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(404, "Not found.")
             self._send(*self._route(method, url.path, parse_qs(url.query)))
         except ApiError as e:
+            self._discard_body()
             self._send(e.status, {"error": e.message})
         except Exception:  # noqa: BLE001 - last resort: log details, show a generic message
             log.exception("Unhandled error for %s %s", method, self.path)
+            self._discard_body()
             self._send(500, {"error": "Server error. Details are in timetracker.log."})
+
+    def _discard_body(self) -> None:
+        """Read an unread request body before answering an error.
+
+        Closing a socket with unread data makes Windows reset the connection, and the
+        client then never sees the error response. Oversized bodies are not read.
+        """
+        if getattr(self, "_body_read", False):
+            return
+        self._body_read = True
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if 0 < n <= MAX_BODY_BYTES:
+            self.rfile.read(n)
 
     def do_GET(self): self._handle("GET")
     def do_POST(self): self._handle("POST")
@@ -428,8 +649,9 @@ def make_server(port: int = PORT) -> ThreadingHTTPServer:
 if __name__ == "__main__":
     logging.basicConfig(filename=LOG_PATH, level=logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s")
-    init_db()
+    # Take the port first: a second copy of the server stops here, before it touches the database.
     srv = make_server()
+    init_db()
     print(f"TimeTracker running on http://localhost:{PORT}  (Ctrl+C to stop)")
     try:
         srv.serve_forever()
