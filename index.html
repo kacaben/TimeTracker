@@ -56,6 +56,9 @@
   #client { font-weight:600; min-width:160px; }
   #toggle.switch { background:var(--warn); }
   #toggle:disabled, button.small:disabled { opacity:.5; cursor:not-allowed; }
+  .cardhead { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+  .daytotal { color:var(--muted); font-size:14px; }
+  .daytotal b { color:var(--fg); font-size:18px; font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -82,7 +85,10 @@
   </section>
 
   <section class="card" id="entriesCard">
-    <h2 id="daytitle">Entries</h2>
+    <div class="cardhead">
+      <h2 id="daytitle">Entries</h2>
+      <div class="daytotal">Worked <b id="dayworked">0:00</b></div>
+    </div>
     <div id="entries"></div>
     <div class="row" style="margin-top:12px">
       <input type="text" id="addStart" class="dt" placeholder="DD.MM.YYYY HH:MM">
@@ -249,6 +255,18 @@ function tick() {   // cheap live update; no network
     todayRow.children[3].textContent = hm(d.worked + extra - d.target);
   }
   document.title = run ? `▶ ${hms(Date.now()/1000 - run.start)} · ${clientName(run.client_id)}` : 'TimeTracker';
+  renderDayTotal();
+}
+
+function dayBounds(day) {   // real local midnights: daylight-saving days are 23 or 25 hours
+  const [y, m, d] = day.split('-').map(Number);
+  return [new Date(y, m - 1, d).getTime()/1000, new Date(y, m - 1, d + 1).getTime()/1000];
+}
+
+function renderDayTotal() {   // time worked for this client on the selected day; a running timer counts up to now
+  const [s, e] = dayBounds(selDay), now = Date.now()/1000;
+  const total = entriesForDay(selDay).reduce((sum, x) => sum + Math.max(0, Math.min(x.end ?? now, e) - Math.max(x.start, s)), 0);
+  $('dayworked').textContent = hm(total);
 }
 
 function renderDays() {
@@ -263,9 +281,8 @@ function renderDays() {
   }
 }
 
-function entriesForDay(day) {   // real local midnights: daylight-saving days are 23 or 25 hours
-  const [y, m, d] = day.split('-').map(Number);
-  const s = new Date(y, m - 1, d).getTime()/1000, e = new Date(y, m - 1, d + 1).getTime()/1000;
+function entriesForDay(day) {
+  const [s, e] = dayBounds(day);
   return S.entries.filter(x => x.start < e && (x.end ?? Infinity) > s);
 }
 
@@ -275,6 +292,7 @@ function renderEntries() {
   const list = entriesForDay(selDay);
   if (!list.length) box.innerHTML = '<div class="empty">No entries</div>';
   for (const e of list) box.appendChild(entryRow(e));
+  renderDayTotal();
   if (!$('addStart').value) { setDT($('addStart'), eu(selDay) + ' 09:00'); setDT($('addEnd'), eu(selDay) + ' 17:00'); }
 }
 

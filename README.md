@@ -6,7 +6,7 @@ Personal start/stop time tracker for several clients. Python standard library on
 
 ![TimeTracker: client picker and start/stop timer, entries for the selected day, and the client's monthly overview with worked, target and missing hours](docs/screenshot.png)
 
-- One-click start/stop timer, manual entries, editing, per-day entry list.
+- One-click start/stop timer, manual entries, editing, per-day entry list with the day's total.
 - Several clients, each with its own entries and daily hours. One timer: starting it for another client stops the running one.
 - Monthly overview per client: worked vs. target hours, overtime, and hours needed per remaining workday.
 - Daily-hours target with history: a change applies from a chosen date, past months stay as they were.
